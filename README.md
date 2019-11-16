@@ -1,78 +1,50 @@
 # Airrecord
 
-Airrecord is an alternative Airtable Ruby libary to
-[`airtable-ruby`](https://github.com/airtable/airtable-ruby). Airrecord attempts
-to enforce a more [database-like API to
-Airtable](http://sirupsen.com/minimum-viable-airtable/). However, there's also
-an [ad-hoc API available](https://github.com/sirupsen/airrecord#ad-hoc-api) that
-skips the class definitions!
+Rewrite of [Airrecord for Ruby](https://github.com/sirupsen/airrecord) for Python.
 
-You can add this line to your Gemfile to use Airrecord:
+You can add this line to your `requirements.txt` to use Airrecord:
 
-```ruby
-gem 'airrecord'
+```python
+airrecord
 ```
 
 A quick example to give an idea of the API that Airrecord provides:
 
-```ruby
-Airrecord.api_key = "key1"
+```python
+import airrecord
 
-class Tea < Airrecord::Table
-  self.base_key = "app1"
-  self.table_name = "Teas"
+@airrecord.config("api_key", "app1", "Teas")
+@airrecord.has_many('brews', Brew, "Brews")
+class Tea(airrecord.Table)
+  @classmethod
+  def chinese(cls):
+    cls.all(filter: '{Country} = "China"')
 
-  has_many :brews, class: "Brew", column: "Brews"
+  @classmethod
+  def cheapest_and_best(cls):
+    cls.all(sort: { "Rating" => "desc", "Price" => "asc" })
 
-  def self.chinese
-    all(filter: '{Country} = "China"')
-  end
+  def location(self):
+    [self.fields["Village"], self.fields["Country"], self.fields["Region"]].join(", ")
 
-  def self.cheapest_and_best
-    all(sort: { "Rating" => "desc", "Price" => "asc" })
-  end
+  def is_green(self):
+    self.fields["Type"] == "Green"
 
-  def location
-    [self["Village"], self["Country"], self["Region"]].compact.join(", ")
-  end
+@airrecord.config("api_key", "app1", "Brews")
+@airrecord.belongs_to(Tea, "Tea")
+class Brew(airrecord.Table)
+  @classmethod
+  def hot(cls)
+    cls.all(filter: "{Temperature} > 90")
 
-  def green?
-    self["Type"] == "Green"
-  end
-end
-
-class Brew < Airrecord::Table
-  self.base_key = "app1"
-  self.table_name = "Brews"
-
-  belongs_to :tea, class: "Tea", column: "Tea"
-
-  def self.hot
-    all(filter: "{Temperature} > 90")
-  end
-
-  def done_brewing?
-    Time.parse(self["Created At"]) + self["Duration"] > Time.now
-  end
-end
+  def is_done_brewing(self):
+    Time.parse(self.fields["Created At"]) + self.fields["Duration"] > Time.now
 
 teas = Tea.all
 tea = teas.first
 tea["Country"] # access atribute
 tea.location # instance methods
 tea.brews # associated brews
-```
-
-A short-hand API for definitions and more ad-hoc querying is also available:
-
-```ruby
-Tea = Airrecord.table("api_key", "app_key", "Teas")
-
-Tea.all.each do |record|
-  puts "#{record.id}: #{record["Name"]}"
-end
-
-Tea.find("rec3838")
 ```
 
 ## Documentation
@@ -84,15 +56,6 @@ page](https://airtable.com/api), select your base and obtain your API key and
 application token.
 
 ![](https://cloud.githubusercontent.com/assets/97400/23580721/a0815df4-00bb-11e7-9abf-140a01625678.png)
-
-You can provide a global API key with:
-
-```ruby
-Airrecord.api_key = "your api key"
-```
-
-The app token has to be set on the definitions of the tables (see API below).
-You can override the API key per table.
 
 ### Table
 
@@ -393,47 +356,6 @@ For production use-cases, it's worth considering adding retries and circuit
 breakers to Airrecord. This is _not_ enabled by default. Airrecord uses the
 Faraday gem for HTTP. Similar to Rack, you can add middlewares to provide
 reusable logic for making HTTP requests.
-
-#### Configuring Retries
-
-Refer to the documentation for [all configuration
-options](http://www.rubydoc.info/gems/faraday/0.9.2/Faraday/Request/Retry).
-
-```ruby
-Airrecord::Table.client.connection.request :retry,
-  max: 5, interval: 1, interval_randomness: 2, backoff_factor: 2,
-  exceptions: [...] # It's suggested to be explicit here instead of relying on defaults
-```
-
-If you are running background scripts or workers with the sole purpose of
-communicating with Airtable, it may be worth retrying on failures. Note that
-this may cause the process to sleep for many seconds, so choose your values
-carefully.
-
-The `Net::HTTP` library that Faraday uses behind the scenes by default has
-opaque exceptions. If you choose to go beyond retrying on timeouts (as is
-provided by default by the Retry middleware), I suggest referring to a complete
-list of `Net::HTTP` exceptions, such as [this
-one](https://github.com/Shopify/semian/blob/master/lib/semian/net_http.rb#L35-L44).
-
-### Circuit Breaker
-
-If you're calling Airtable in an application and want to avoid hanging processes
-when Airtable is unavailable, we strongly recommend configuring [circuit
-breakers](https://github.com/Shopify/semian#circuit-breaker). This is a
-mechanism that after `threshold` failures, it'll start failing immediately
-instead of waiting until the timeout. This can avoid outages where all workers
-are hung trying to talk to a service that will never return, instead of serving
-useful fallbacks or requests that don't rely on the service. Failing fast is
-paramount for building reliable systems.
-
-You can configure a middleware such as
-[`faraday_middleware-circuit_breaker`](https://github.com/textmaster/faraday_middleware-circuit_breaker):
-
-```ruby
-Airrecord::Table.client.connection.request :circuit_breaker,
-  timeout: 20, threshold: 5
-```
 
 ## Contributing
 

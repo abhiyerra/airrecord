@@ -1,3 +1,243 @@
+require 'test_helper'
+
+class AirrecordTest < Minitest::Test
+  def test_set_api_key
+    Airrecord.api_key = "walrus"
+    assert_equal "walrus", Airrecord.api_key
+  end
+end
+require 'test_helper'
+
+class Tea < Airrecord::Table
+  self.api_key = "key1"
+  self.base_key = "app1"
+  self.table_name = "Teas"
+
+  has_many :brews, class: "Brew", column: "Brews"
+  has_one :pot, class: "Teapot", column: "Teapot"
+end
+
+class Brew < Airrecord::Table
+  self.api_key = "key1"
+  self.base_key = "app1"
+  self.table_name = "Brews"
+
+  belongs_to :tea, class: "Tea", column: "Tea"
+end
+
+class Teapot < Airrecord::Table
+  self.api_key = "key1"
+  self.base_key = "app1"
+  self.table_name = "Teapots"
+
+  belongs_to :tea, class: "Tea", column: "Tea"
+end
+
+
+class AssociationsTest < MiniTest::Test
+  def setup
+    @stubs = Faraday::Adapter::Test::Stubs.new
+    Tea.client.connection = Faraday.new { |builder|
+      builder.adapter :test, @stubs
+    }
+  end
+
+  def test_has_many_associations
+    tea = Tea.new("Name" => "Dong Ding", "Brews" => ["rec2", "rec1"])
+
+    brews = [
+      { "id" => "rec2", "Name" => "Good brew" },
+      { "id" => "rec1", "Name" => "Decent brew" }
+    ]
+    stub_request(brews, table: Brew)
+
+    assert_equal 2, tea.brews.size
+    assert_kind_of Airrecord::Table, tea.brews.first
+    assert_equal "rec1", tea.brews.first.id
+  end
+
+  def test_has_many_handles_empty_associations
+    tea = Tea.new("Name" => "Gunpowder")
+    stub_request([{ "id" => "brew1", "Name" => "unrelated"  }], table: Brew)
+    assert_equal 0, tea.brews.size
+  end
+
+  def test_belongs_to
+    brew = Brew.new("Name" => "Good Brew", "Tea" => ["rec1"])
+    tea = Tea.new("Name" => "Dong Ding", "Brews" => ["rec2"])
+    stub_find_request(tea, table: Tea, id: "rec1")
+
+    assert_equal "rec1", brew.tea.id
+  end
+
+  def test_has_one
+    tea = Tea.new("id" => "rec1", "Name" => "Sencha", "Teapot" => ["rec3"])
+    pot = Teapot.new("Name" => "Cast Iron", "Tea" => ["rec1"])
+    stub_find_request(pot, table: Teapot, id: "rec3")
+
+    assert_equal "rec3", tea.pot.id
+  end
+
+  def test_has_one_handles_empty_associations
+    pot = Teapot.new("Name" => "Ceramic")
+
+    assert_nil pot.tea
+  end
+
+  def test_build_association_from_strings
+    tea = Tea.new({"Name" => "Jingning", "Brews" => ["rec2", "rec1"]})
+    stub_post_request(tea, table: Tea)
+
+    tea.create
+
+    stub_request([{ id: "rec2" }, { id: "rec1" }], table: Brew)
+    assert_equal 2, tea.brews.count
+  end
+
+  def test_build_belongs_to_association_from_setter
+    tea = Tea.new({"Name" => "Jingning", "Brews" => []}, id: "rec1")
+    brew = Brew.new("Name" => "greeaat")
+    brew.tea = tea
+    stub_post_request(brew, table: Brew)
+
+    brew.create
+
+    stub_find_request(tea, table: Tea, id: "rec1")
+    assert_equal tea.id, brew.tea.id
+  end
+
+  def test_build_has_many_association_from_setter
+    tea = Tea.new("Name" => "Earl Grey")
+    brews = %w[Perfect Meh].each_with_object([]) do |name, memo|
+      brew = Brew.new("Name" => name)
+      stub_post_request(brew, table: Brew)
+      brew.create
+      memo << brew
+    end
+
+    tea.brews = brews
+
+    brew_fields = brews.map { |brew| brew.fields.merge("id" => brew.id) }
+    stub_request(brew_fields, table: Brew)
+
+    assert_equal 2, tea.brews.size
+    assert_kind_of Airrecord::Table, tea.brews.first
+    assert_equal tea.brews.first.id, brews.first.id
+  end
+end
+require 'test_helper'
+require 'airrecord/faraday_rate_limiter'
+
+class FaradayRateLimiterTest < Minitest::Test
+  def setup
+    @stubs = Faraday::Adapter::Test::Stubs.new
+    @rps = 5
+    @sleeps = []
+    @connection = Faraday.new { |builder|
+      builder.request :airrecord_rate_limiter,
+        requests_per_second: @rps,
+        sleeper: ->(s) { @sleeps << s }
+
+      builder.adapter :test, @stubs
+    }
+
+    @stubs.get("/whatever") do |env|
+      [200, {}, "walrus"]
+    end
+  end
+
+  def teardown
+    @connection.app.clear
+  end
+
+  def test_passes_through_single_request
+    @connection.get("/whatever")
+    assert_predicate @sleeps, :empty?
+  end
+
+  def test_sleeps_on_the_rps_plus_oneth_request
+    @rps.times do
+      @connection.get("/whatever")
+    end
+
+    assert_predicate @sleeps, :empty?
+
+    @connection.get("/whatever")
+
+    assert_equal 1, @sleeps.size
+    assert @sleeps.first > 0.9
+  end
+end
+require 'test_helper'
+
+class QueryStringTest < Minitest::Test
+  def setup
+    @params = { maxRecords: 50, view: "Master" }
+    @query = "maxRecords=3&pageSize=1&sort%5B0%5D%5Bfield%5D=Quality&sort%5B0%5D%5Bdirection%5D=asc"
+    @qs = Airrecord::QueryString
+  end
+
+  def test_encoding_simple_params_matches_faraday
+    expected = Faraday::NestedParamsEncoder.encode(@params)
+    result = @qs.encode(@params)
+
+    assert_equal(result, expected)
+  end
+
+  def test_decode_matches_faraday
+    assert_equal(
+      Faraday::NestedParamsEncoder.decode(@query),
+      @qs.decode(@query),
+    )
+  end
+
+  def test_encoding_arrays_uses_indices
+    params = @params.merge(fields: %w[Quality Price])
+
+    expected = "maxRecords=50&view=Master&fields%5B0%5D=Quality&fields%5B1%5D=Price"
+    result = @qs.encode(params)
+
+    assert_equal(result, expected)
+  end
+
+  def test_encoding_arrays_of_objects
+    params = { sort: [
+      { field: 'Quality', direction: 'desc' },
+      { field: 'Price', direction: 'asc' }
+    ]}
+
+    expected = "sort%5B0%5D%5Bfield%5D=Quality&sort%5B0%5D%5Bdirection%5D=desc&sort%5B1%5D%5Bfield%5D=Price&sort%5B1%5D%5Bdirection%5D=asc"
+    result = @qs.encode(params)
+
+    assert_equal(result, expected)
+  end
+
+  def test_params_fuzzing
+    params = {
+      "an explicit nil" => nil,
+      horror: [1, 2, [{ mic: "check" }, { one: "two" }]],
+      view: "A name with spaces",
+    }
+
+    expected = {
+      "an explicit nil" => "",
+      "horror" => ["1", "2", [{ "mic" => "check" }, { "one" => "two" }]],
+      "view" => "A name with spaces",
+    }
+    result = Faraday::NestedParamsEncoder.decode(@qs.encode(params))
+
+    assert_equal(result, expected)
+  end
+
+  def test_escaping_one_string
+    assert_equal(@qs.escape("test string"), "test%20string")
+  end
+
+  def test_escaping_many_strings
+    strings = ['test', 'string']
+    assert_equal(@qs.escape(*strings), 'teststring')
+  end
+end
 require 'securerandom'
 require 'test_helper'
 
@@ -385,5 +625,100 @@ class TableTest < Minitest::Test
     walrus2 = Walrus.new("Name" => "Wally2")
 
     assert walrus1.hash != walrus2.hash
+  end
+end
+$LOAD_PATH.unshift File.expand_path('../../lib', __FILE__)
+require 'airrecord'
+require 'byebug'
+require 'securerandom'
+require 'minitest/autorun'
+
+class Minitest::Test
+  def stub_delete_request(id, table: @table, status: 202, response_body: "")
+    @stubs.delete("/v0/#{@table.base_key}/#{@table.table_name}/#{id}") do |env|
+      [status, {}, response_body]
+    end
+  end
+
+  def stub_post_request(record, table: @table, status: 200, headers: {}, return_body: nil)
+    return_body ||= {
+      id: SecureRandom.hex(16),
+      fields: record.serializable_fields,
+      createdTime: Time.now,
+    }
+    return_body = return_body.to_json
+
+    request_body = {
+      fields: record.serializable_fields,
+    }.to_json
+
+    @stubs.post("/v0/#{table.base_key}/#{table.table_name}", request_body) do |env|
+      [status, headers, return_body]
+    end
+  end
+
+  def stub_patch_request(record, updated_keys, table: @table, status: 200, headers: {}, return_body: nil)
+    return_body ||= { fields: record.fields }
+    return_body = return_body.to_json
+
+    request_body = {
+      fields: Hash[updated_keys.map { |key|
+        [key, record.fields[key]]
+      }]
+    }.to_json
+    @stubs.patch("/v0/#{@table.base_key}/#{@table.table_name}/#{record.id}", request_body) do |env|
+      [status, headers, return_body]
+    end
+  end
+
+  # TODO: Problem, can't stub on params.
+  def stub_request(records, table: @table, status: 200, headers: {}, offset: nil, clear: true)
+    @stubs.instance_variable_set(:@stack, {}) if clear
+
+    body = {
+      records: records.map { |record|
+        {
+          id: record["id"] || SecureRandom.hex(16),
+          fields: record,
+          createdTime: Time.now,
+        }
+      },
+      offset: offset,
+    }.to_json
+
+    @stubs.get("/v0/#{table.base_key}/#{table.table_name}") do |env|
+      [status, headers, body]
+    end
+  end
+
+  def stub_find_request(record = nil, table: @table, status: 200, headers: {}, return_body: nil, id: nil)
+    return_body ||= {
+      id: id,
+      fields: record.fields,
+    }
+    return_body = return_body.to_json
+
+    id ||= record.id
+
+    @stubs.get("/v0/#{table.base_key}/#{table.table_name}/#{id}") do |env|
+      [status, headers, return_body]
+    end
+  end
+
+  def stub_error_request(type:, message:, status: 401, headers: {}, table: @table)
+    body = {
+      error: {
+        type: type,
+        message: message,
+      }
+    }.to_json
+
+    @stubs.get("/v0/#{table.base_key}/#{table.table_name}") do |env|
+      [status, headers, body]
+    end
+  end
+
+  def first_record
+    @table.records.first
   end
 end
